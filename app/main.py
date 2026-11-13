@@ -6,8 +6,7 @@ from app.schemas import (
 )
 from app.dependencies import get_models
 from app.services import PredictionService
-from ml.config import EXPERIMENTS_DIR, TICKERS
-import json
+from ml.models import load_latest_metrics
 import os
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
@@ -16,13 +15,10 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    print("\n" + "="*50)
-    print("🚀  RiskGuard AI is running!")
-    print("👉  Access here: http://localhost:8000")
-    print("="*50 + "\n")
+    # Plain ASCII on purpose: an emoji here crashes startup when stdout is a
+    # Windows pipe or log file (cp1252 cannot encode it).
+    print("RiskGuard AI is running.")
     yield
-    # Shutdown
     print("Shutting down...")
 
 app = FastAPI(
@@ -98,19 +94,13 @@ def recommend_similar(ticker: str, risk_preference: str = None, models = Depends
 
 @app.get("/metrics")
 def get_metrics():
-    # Find latest metrics file
-    if not EXPERIMENTS_DIR.exists():
-         raise HTTPException(status_code=404, detail="No experiments found")
-         
-    files = sorted(EXPERIMENTS_DIR.glob("metrics_*.json"))
-    if not files:
+    """Evaluation results of the model being served (saved next to it at training time)."""
+    metrics = load_latest_metrics()
+    if metrics is None:
         raise HTTPException(status_code=404, detail="No metrics found")
-        
-    latest = files[-1]
-    with open(latest, "r") as f:
-        data = json.load(f)
-    return data
+    return metrics
 
 
-
-
+@app.get("/health")
+def health(models = Depends(get_models)):
+    return {"status": "ok", "model_loaded": bool(models)}

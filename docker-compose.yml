@@ -1,15 +1,9 @@
-
-
 services:
   api:
     build: .
     ports:
       - "8000:8000"
     environment:
-      - ALPHAVANTAGE_API_KEY=${ALPHAVANTAGE_API_KEY}
+      - ALPHAVANTAGE_API_KEY=${ALPHAVANTAGE_API_KEY:-}
     volumes:
-      - ./models:/app/models # Mount models so they persist/update
-      - ./experiments:/app/experiments
-      - ./data:/app/data
-
-
+      - ./data:/app/data   # keep the 24-hour price cache between restarts

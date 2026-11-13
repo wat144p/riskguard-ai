@@ -1,153 +1,165 @@
+"""Daily price history for a list of tickers.
 
+Each ticker is looked up in this order:
+  1. the local CSV cache in data/ (if younger than 24 hours)
+  2. Alpha Vantage (only when ALPHAVANTAGE_API_KEY is set)
+  3. yfinance (when there is no key, or Alpha Vantage fails for any reason)
+
+Every source returns the same columns: date, open, high, low, close, volume, ticker.
+Prices are split- and dividend-adjusted in both sources, so a stock split does not
+show up as a fake -90% daily return.
+"""
 import os
-from dotenv import load_dotenv
-load_dotenv()
-import pandas as pd
 import time
-import requests  # Alpha Vantage API calls
-import yfinance as yf  # fallback if Alpha Vantage fails
-from pathlib import Path
-from typing import List, Optional
-from .config import DATA_DIR
+from typing import Dict, List, Optional
 
-# Get Alpha Vantage API key from environment variables
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
+import pandas as pd
+import requests
+from dotenv import load_dotenv
+
+from .config import DATA_DIR, HISTORY_YEARS
+
+load_dotenv()
+
+CACHE_MAX_AGE_S = 24 * 60 * 60
+ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
+ALPHA_VANTAGE_PAUSE_S = 12  # the free tier allows about 5 calls a minute
+REQUEST_TIMEOUT_S = 30
+PRICE_COLUMNS = ["date", "open", "high", "low", "close", "volume"]
+
+# Which source served each ticker on the most recent fetch_stock_data() call.
+# The training flow writes this into the metrics file.
+last_sources: Dict[str, str] = {}
+
+
+class SourceUnavailable(Exception):
+    """A data source could not return usable prices for a ticker."""
+
+
+def _standardize(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    df = df[PRICE_COLUMNS].copy()
+    df["date"] = pd.to_datetime(df["date"], utc=True)
+    for col in PRICE_COLUMNS[1:]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["ticker"] = ticker
+    # yfinance sometimes returns a half-filled row for the current day (volume but no
+    # prices). A row without a close would turn into a fake 0% return and a NaN feature.
+    df = df.dropna(subset=["close"])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def _from_cache(ticker: str) -> Optional[pd.DataFrame]:
+    path = DATA_DIR / f"{ticker}.csv"
+    if not path.exists():
+        return None
+    if time.time() - path.stat().st_mtime > CACHE_MAX_AGE_S:
+        print(f"Cache for {ticker} is older than 24h, refetching.")
+        return None
+    try:
+        return _standardize(pd.read_csv(path), ticker)
+    except Exception:
+        print(f"Cache for {ticker} is unreadable, refetching.")
+        return None
+
+
+def _from_alpha_vantage(ticker: str, api_key: str) -> pd.DataFrame:
+    try:
+        response = requests.get(
+            ALPHA_VANTAGE_URL,
+            params={
+                "function": "TIME_SERIES_DAILY_ADJUSTED",
+                "symbol": ticker,
+                "outputsize": "full",
+                "apikey": api_key,
+            },
+            timeout=REQUEST_TIMEOUT_S,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise SourceUnavailable(f"request failed ({type(exc).__name__})") from exc
+
+    series = payload.get("Time Series (Daily)")
+    if not series:
+        # Rate-limit notes, premium-endpoint notices and bad symbols all arrive as a
+        # JSON object with a single message key instead of the time series.
+        reason = next((k for k in ("Information", "Note", "Error Message") if k in payload), "no time series")
+        raise SourceUnavailable(reason)
+
+    raw = pd.DataFrame.from_dict(series, orient="index").apply(pd.to_numeric, errors="coerce")
+    # Put open/high/low/close on the adjusted basis (the same basis yfinance uses).
+    factor = raw["5. adjusted close"] / raw["4. close"]
+    df = pd.DataFrame(
+        {
+            "date": raw.index,
+            "open": raw["1. open"] * factor,
+            "high": raw["2. high"] * factor,
+            "low": raw["3. low"] * factor,
+            "close": raw["5. adjusted close"],
+            "volume": raw["6. volume"],
+        }
+    )
+    df = _standardize(df, ticker)
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.DateOffset(years=HISTORY_YEARS)
+    return df[df["date"] >= cutoff].reset_index(drop=True)
+
+
+def _from_yfinance(ticker: str) -> pd.DataFrame:
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(ticker).history(period=f"{HISTORY_YEARS}y")
+    except Exception as exc:
+        raise SourceUnavailable(f"yfinance error ({type(exc).__name__})") from exc
+    if hist is None or hist.empty:
+        raise SourceUnavailable("yfinance returned no rows")
+    hist = hist.reset_index().rename(
+        columns={"Date": "date", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}
+    )
+    return _standardize(hist, ticker)
+
+
+def fetch_ticker(ticker: str, use_cache: bool = True) -> Optional[pd.DataFrame]:
+    """Returns one ticker's history, or None if every source failed."""
+    if use_cache:
+        cached = _from_cache(ticker)
+        if cached is not None:
+            last_sources[ticker] = "cache"
+            return cached
+
+    df = None
+    api_key = os.getenv("ALPHAVANTAGE_API_KEY")
+    if api_key:
+        try:
+            df = _from_alpha_vantage(ticker, api_key)
+            last_sources[ticker] = "alpha_vantage"
+        except SourceUnavailable as exc:
+            print(f"Alpha Vantage unavailable for {ticker} ({exc}); falling back to yfinance.")
+        finally:
+            time.sleep(ALPHA_VANTAGE_PAUSE_S)
+
+    if df is None:
+        try:
+            df = _from_yfinance(ticker)
+            last_sources[ticker] = "yfinance"
+        except SourceUnavailable as exc:
+            print(f"No data for {ticker}: {exc}")
+            last_sources[ticker] = "failed"
+            return None
+
+    if use_cache:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(DATA_DIR / f"{ticker}.csv", index=False)
+    return df
+
 
 def fetch_stock_data(tickers: List[str], use_cache: bool = True) -> pd.DataFrame:
+    """Returns one combined DataFrame for all tickers that could be fetched.
+
+    Columns: date, open, high, low, close, volume, ticker. Empty if nothing was fetched.
     """
-    Fetches daily stock data for the given tickers using Alpha Vantage API.
-    Returns a combined DataFrame with columns: [ticker, date, open, high, low, close, volume]
-    """
-    if not ALPHA_VANTAGE_API_KEY:
-        raise ValueError("ALPHA_VANTAGE_API_KEY environment variable not set.")
-
-    all_data = []
-    
-    # Ensure data directory exists
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    for ticker in tickers:
-        cache_path = DATA_DIR / f"{ticker}.csv"
-        
-        # Simple cache logic
-        if use_cache and cache_path.exists():
-            # Check if cache is stale (older than 24 hours)
-            last_modified = cache_path.stat().st_mtime
-            if (time.time() - last_modified) > 86400: # 24 hours in seconds
-                print(f"Cache for {ticker} is expired (>24h). Refetching...")
-            else:
-                print(f"Loading {ticker} from cache...")
-                try:
-                    df = pd.read_csv(cache_path)
-                    df["date"] = pd.to_datetime(df["date"], utc=True)
-                    all_data.append(df)
-                    continue
-                except Exception:
-                    print(f"Cache corrupted for {ticker}, refetching...")
-
-        print(f"Fetching {ticker} from Alpha Vantage...")
-        
-        try:
-            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol={ticker}&outputsize=full&apikey={ALPHA_VANTAGE_API_KEY}"
-            response = requests.get(url)
-            response.raise_for_status() # Raise an exception for HTTP errors
-            data = response.json()
-
-            # Check for premium or info messages from Alpha Vantage
-            if "Information" in data and "premium" in data["Information"].lower():
-                print(f"Alpha Vantage premium limit reached for {ticker}, falling back to yfinance")
-                try:
-                    yf_ticker = yf.Ticker(ticker)
-                    hist = yf_ticker.history(period="5y")
-                    if hist.empty:
-                        print(f"yfinance returned empty data for {ticker}")
-                        continue
-                    hist = hist.reset_index().rename(columns={
-                        "Date": "date",
-                        "Open": "open",
-                        "High": "high",
-                        "Low": "low",
-                        "Close": "close",
-                        "Volume": "volume",
-                    })
-                    hist["date"] = pd.to_datetime(hist["date"], utc=True)
-                    df = hist[["date", "open", "high", "low", "close", "volume"]].copy()
-                except Exception as e:
-                    print(f"yfinance error for {ticker}: {e}")
-                    continue
-                # Append and skip the rest of Alpha Vantage processing
-                df["ticker"] = ticker
-                df = df.sort_values("date")
-                if use_cache:
-                    df.to_csv(cache_path, index=False)
-                all_data.append(df)
-                # Respect rate limit (still wait a bit)
-                time.sleep(12)
-                continue
-            # Debug: show the raw response when we don't get a time series
-            if "Error Message" in data:
-                print(f"Alpha Vantage error for {ticker}: {data['Error Message']}")
-                continue
-            if "Note" in data:
-                print(f"Alpha Vantage note for {ticker}: {data['Note']}")
-                time.sleep(15)
-                continue
-            # If we reach here but there is no time series, dump the whole payload for inspection
-            if "Time Series (Daily)" not in data:
-                print(f"Unexpected Alpha Vantage response for {ticker}: {data}")
-                continue
-            time_series = data.get("Time Series (Daily)", {})
-            if not time_series:
-                print(f"Warning: No daily time series data found for {ticker}")
-                continue
-
-            # Convert the time series data to a DataFrame
-            hist = pd.DataFrame.from_dict(time_series, orient="index")
-            hist.index.name = "date"
-            hist = hist.reset_index()
-
-            # Rename columns to a standardized format
-            # Alpha Vantage gives: 1. open, 2. high, 3. low, 4. close, 5. adjusted close, 6. volume, 7. dividend amount, 8. split coefficient
-            hist.columns = [
-                "date", "open", "high", "low", "close", "adjusted close",
-                "volume", "dividend amount", "split coefficient"
-            ]
-            
-            # Convert date column to datetime objects
-            hist["date"] = pd.to_datetime(hist["date"], utc=True)
-
-            # Standardize columns
-            needed_cols = ["date", "open", "high", "low", "close", "volume"]
-            # Ensure all needed columns exist and are numeric
-            for col in needed_cols[1:]: # Skip 'date'
-                hist[col] = pd.to_numeric(hist[col], errors='coerce')
-            
-            if not all(col in hist.columns for col in needed_cols):
-                 print(f"Missing columns for {ticker}. Found: {hist.columns}")
-                 continue
-
-            df = hist[needed_cols].copy()
-            df["ticker"] = ticker
-            
-            # Sort
-            df = df.sort_values("date")
-            
-            # Cache it
-            if use_cache:
-                df.to_csv(cache_path, index=False)
-            
-            all_data.append(df)
-            
-            # Be nice to the API
-            time.sleep(12)  # Respect free tier rate limit (≈5 calls/min)
-            
-        except Exception as e:
-            print(f"Error fetching {ticker}: {e}")
-
-    if not all_data:
+    last_sources.clear()
+    frames = [df for df in (fetch_ticker(t, use_cache) for t in tickers) if df is not None]
+    if not frames:
         return pd.DataFrame()
-
-    combined_df = pd.concat(all_data, ignore_index=True)
-    return combined_df
-
-
+    return pd.concat(frames, ignore_index=True)

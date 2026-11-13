@@ -1,22 +1,26 @@
+"""Is the return regressor overfitting, or is there simply no signal?
+
+Usage (from the repo root, after a training run or with the committed release model):
+    python scripts/check_overfitting.py
+"""
 import sys
 from pathlib import Path
-import pandas as pd
 from sklearn.metrics import r2_score
 
 # Add project root to python path
 sys.path.append(str(Path(__file__).parent.parent))
 
-from ml.config import TICKERS, TEST_SIZE_DAYS
+from ml.config import TICKERS
 from ml.data_ingestion import fetch_stock_data
 from ml.feature_engineering import create_features, split_data
 from ml.models import load_latest_models
 
 def check_overfitting():
     print("Loading data...")
-    # 1. Fetch & Prepare Data (Identical to training flow)
+    # 1. Fetch and prepare data exactly as the training flow does
     df = fetch_stock_data(TICKERS, use_cache=True)
     df_features = create_features(df)
-    train_df, test_df = split_data(df_features, test_days=TEST_SIZE_DAYS)
+    train_df, test_df, _ = split_data(df_features)
     
     # 2. Load Models
     print("Loading latest models...")
@@ -42,8 +46,8 @@ def check_overfitting():
     print("\n" + "="*30)
     print(f"REGRESSION MODEL DIAGNOSTICS")
     print("="*30)
-    print(f"Train R²: {train_r2:.4f}")
-    print(f"Test R²:  {test_r2:.4f}")
+    print(f"Train R2: {train_r2:.4f}")
+    print(f"Test R2:  {test_r2:.4f}")
     print("-" * 30)
     
     if train_r2 > 0.5 and test_r2 < 0:

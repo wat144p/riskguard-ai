@@ -61,62 +61,42 @@ def check_feature_drift(train_df: pd.DataFrame, new_df: pd.DataFrame, features: 
 
 def run_deepchecks_suite(train_df: pd.DataFrame, test_df: pd.DataFrame) -> dict:
     """
-    Runs a DeepChecks suite. If DeepChecks fails (e.g. usage on Python 3.14 alpha),
-    falls back to manual robust validation to ensure pipeline continuity.
-    """
-    try:
-        # Attempt to import setuptools to fix missing dependency on some systems
-        try:
-            import setuptools
-        except ImportError:
-            pass
+    Runs the DeepChecks train-test validation suite on the model's inputs and label.
 
+    DeepChecks 0.19 only imports on the pinned stack in requirements.txt (numpy 1.x,
+    scikit-learn < 1.6, setuptools < 81). If it cannot be imported or crashes, a small
+    manual check runs instead so the pipeline still finishes; the returned "mode" says
+    which of the two actually ran, and it is written to metrics.json.
+    """
+    from .models import FEATURES
+
+    columns = FEATURES + ["ticker", "risk_class"]
+    try:
         from deepchecks.tabular import Dataset
         from deepchecks.tabular.suites import train_test_validation
-        
-        # 1. Wrap DataFrames in DeepChecks Dataset
-        label_col = "target_return_next_day"
-        if label_col not in train_df.columns:
-            return {"passed": False, "error": "Label column missing"}
 
-        ds_train = Dataset(train_df, label=label_col, cat_features=["ticker"])
-        ds_test = Dataset(test_df, label=label_col, cat_features=["ticker"])
-        
-        # 2. Run the Suite
-        suite = train_test_validation()
-        result = suite.run(train_dataset=ds_train, test_dataset=ds_test)
-        
-        # 3. Return Summary
-        failures = result.get_not_passed_checks()
-        passed = len(failures) == 0
-        
-        return {
-            "passed": passed,
-            "failures": [check.name for check in failures] if failures else [],
-            "score": result.passed_checks_ratio,
-            "mode": "DeepChecks"
-        }
+        ds_train = Dataset(train_df[columns], label="risk_class", cat_features=["ticker"])
+        ds_test = Dataset(test_df[columns], label="risk_class", cat_features=["ticker"])
+        result = train_test_validation().run(train_dataset=ds_train, test_dataset=ds_test)
 
-    except (ImportError, Exception) as e:
-        # Fallback for Python 3.14 compatibility or missing deps
-        print(f"DeepChecks compatibility mode triggered (Reason: {type(e).__name__}). Running manual validation.")
-        
-        # Manual Validation Logic
-        failures = []
-        if train_df.isna().sum().sum() > 0:
-            failures.append("Null Values Detected")
-        
-        if len(train_df) < 100:
-            failures.append("Insufficient Train Data")
-            
-        passed = len(failures) == 0
-        score = 1.0 if passed else 0.5
-        
+        failures = [check.get_header() for check in result.get_not_passed_checks()]
         return {
-            "passed": passed,
+            "mode": "DeepChecks",
+            "passed": len(failures) == 0,
             "failures": failures,
-            "score": score,
-            "mode": "Manual Fallback"
+            "checks_passed": len(result.get_passed_checks()),
         }
 
-
+    except Exception as e:
+        print(f"DeepChecks did not run ({type(e).__name__}); using the manual fallback check.")
+        failures = []
+        if train_df[columns].isna().sum().sum() > 0:
+            failures.append("Null values in training data")
+        if len(train_df) < 100:
+            failures.append("Fewer than 100 training rows")
+        return {
+            "mode": "Manual fallback",
+            "passed": len(failures) == 0,
+            "failures": failures,
+            "reason": type(e).__name__,
+        }

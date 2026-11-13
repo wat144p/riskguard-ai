@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from .config import HISTORY_YEARS
+from .config import LABEL_HORIZON_DAYS, TEST_SIZE_DAYS
 
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -51,66 +51,73 @@ def create_features(df: pd.DataFrame) -> pd.DataFrame:
     df["macd"] = ema_12 - ema_26
     df["macd_signal"] = df.groupby("ticker")["macd"].ewm(span=9, adjust=False).mean().reset_index(0, drop=True)
 
-    # Target Generation
-    # Regression target: Next day return
+    # Targets
+    # Regression target: next day's return.
     df["target_return_next_day"] = df.groupby("ticker")["return"].shift(-1)
-    
-    # Classification target: Risk Class (Forecast future volatility)
-    # We define "Risk" as the volatility of returns over the NEXT 5 days.
-    # This prevents leakage because the model must predict future behavior from past features.
-    df["future_vol"] = df.groupby("ticker")["return"].rolling(window=5).std().shift(-5).reset_index(0, drop=True)
-    
-    # Drop initial NaNs from lags/rolling
+
+    # Classification target: volatility of the NEXT 5 daily returns (t+1 .. t+5).
+    # Every feature above only looks backwards, so features and label never share a day.
+    df["future_vol"] = (
+        df.groupby("ticker")["return"]
+        .transform(lambda r: r.rolling(window=LABEL_HORIZON_DAYS).std().shift(-LABEL_HORIZON_DAYS))
+    )
+
+    # Drop the warm-up rows where lags and rolling windows are not filled yet.
+    # The last 5 rows of each ticker keep a NaN future_vol: the API predicts on them,
+    # and the split below drops them from training and testing.
     df = df.dropna(subset=["return_lag5", "volatility_20d"])
-    
-    # Define risk classes based on future_vol quantiles
-    # We use the training portion of the data to define thresholds to be strictly correct,
-    # but for this demo, global quantiles on the whole set is fine as long as we drop NaNs.
-    df_with_target = df.dropna(subset=["future_vol"])
-    
-    low_thresh = df_with_target["future_vol"].quantile(0.33)
-    high_thresh = df_with_target["future_vol"].quantile(0.66)
-    
-    def get_risk_class(vol):
-        if pd.isna(vol): return np.nan
-        if vol <= low_thresh: return 0 # Low
-        elif vol <= high_thresh: return 1 # Medium
-        else: return 2 # High
-        
-    df["risk_class"] = df["future_vol"].apply(get_risk_class)
-    
-    # Final cleanup: The last 5 rows will have NaN risk_class/future_vol.
-    # We keep them in the dataframe returning from create_features so the Pipeline 
-    # can predict on the most recent row, but training functions MUST drop them.
-    
     return df
 
-def split_data(df: pd.DataFrame, test_size: float = 0.2, random_state: int = 42) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Randomly split the DataFrame into train and test sets.
-    Uses sklearn's train_test_split with stratification on the risk class to keep class balance.
-    Returns (train_df, test_df).
+
+def chronological_split(
+    df: pd.DataFrame, test_days: int = TEST_SIZE_DAYS, gap_days: int = LABEL_HORIZON_DAYS
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Splits by calendar date, across all tickers at once.
+
+    Test  = every row whose date is one of the last `test_days` trading dates.
+    Train = every row dated more than `gap_days` trading dates before the first test date.
+
+    The gap matters because a label looks `gap_days` ahead: without it, the last
+    training labels would be computed from returns inside the test window.
     """
     if df.empty:
-        raise ValueError("Cannot split empty DataFrame.")
-    # Ensure required columns exist
-    required = ["risk_class", "target_return_next_day"]
-    for col in required:
-        if col not in df.columns:
-            raise ValueError(f"DataFrame must contain '{col}' for split.")
-    # Drop rows with NaNs in the target columns
-    df_clean = df.dropna(subset=required).copy()
-    # Strict Time-Series Split (No Shuffle) to prevent data leakage.
-    # Assumption: df is already sorted by date (handled in create_features).
-    if isinstance(test_size, float):
-        train_size = int(len(df_clean) * (1 - test_size))
-    else:
-        # Assumes int means number of test samples (e.g. days)
-        train_size = len(df_clean) - int(test_size)
-        
-    train_df = df_clean.iloc[:train_size]
-    test_df = df_clean.iloc[train_size:]
-    
-    print(f"Time-Series Split: Train={len(train_df)}, Test={len(test_df)}")
+        raise ValueError("Cannot split an empty DataFrame.")
+    labelled = df.dropna(subset=["future_vol", "target_return_next_day"])
+    dates = np.sort(labelled["date"].unique())
+    if len(dates) <= test_days + gap_days:
+        raise ValueError(f"Need more than {test_days + gap_days} trading dates, got {len(dates)}.")
+
+    first_test_date = dates[-test_days]
+    last_train_date = dates[-test_days - gap_days - 1]
+    train_df = labelled[labelled["date"] <= last_train_date].copy()
+    test_df = labelled[labelled["date"] >= first_test_date].copy()
     return train_df, test_df
 
 
+def risk_thresholds(train_df: pd.DataFrame) -> tuple[float, float]:
+    """The two volatility cut-offs between Low / Medium / High, from training rows only."""
+    return (
+        float(train_df["future_vol"].quantile(0.33)),
+        float(train_df["future_vol"].quantile(0.66)),
+    )
+
+
+def to_risk_class(volatility: pd.Series, thresholds: tuple[float, float]) -> np.ndarray:
+    """0 = Low, 1 = Medium, 2 = High."""
+    low, high = thresholds
+    return np.where(volatility <= low, 0, np.where(volatility <= high, 1, 2))
+
+
+def add_risk_class(df: pd.DataFrame, thresholds: tuple[float, float]) -> pd.DataFrame:
+    df = df.copy()
+    df["risk_class"] = to_risk_class(df["future_vol"], thresholds)
+    return df
+
+
+def split_data(
+    df: pd.DataFrame, test_days: int = TEST_SIZE_DAYS, gap_days: int = LABEL_HORIZON_DAYS
+) -> tuple[pd.DataFrame, pd.DataFrame, tuple[float, float]]:
+    """Chronological split, then labels both halves with thresholds learned on train."""
+    train_df, test_df = chronological_split(df, test_days, gap_days)
+    thresholds = risk_thresholds(train_df)
+    return add_risk_class(train_df, thresholds), add_risk_class(test_df, thresholds), thresholds
