@@ -1,11 +1,10 @@
 __pycache__/
 *.py[cod]
-*$py.class
+.pytest_cache/
 .env
 .venv/
-env/
 venv/
-*.pkl
+env/
 *.log
 .coverage
 htmlcov/
@@ -13,10 +12,10 @@ dist/
 build/
 *.egg-info/
 .DS_Store
-data/*.csv
-# models/version_*
-!models/**/*.pkl
-experiments/*.json
-experiments/*.csv
 .prefect/
 
+# Price cache
+data/
+
+# Every training run writes models/version_<timestamp>/. Only models/release/ is committed.
+models/version_*/

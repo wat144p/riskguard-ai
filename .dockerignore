@@ -1,24 +1,15 @@
-# User's venv
-venv/
+.git/
+.github/
 .venv/
+venv/
 env/
 __pycache__/
 *.pyc
-
-# Git history (very large)
-.git/
-.github/
-
-# VS Code settings
-.vscode/
-
-# Local data (if using volumes, but we typically copy data for standalone. Keep data if small, otherwise ignore)
-# data/ 
-
-# Experiments (prevent copying thousands of json logs)
-# # experiments/ (Allowed now for metrics) (Allowed now for metrics)
-
-# Tests
+.pytest_cache/
+.prefect/
+.env
+data/
 tests/
-
-
+docs/
+scripts/
+models/version_*/
