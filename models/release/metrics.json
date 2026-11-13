@@ -1,0 +1,163 @@
+{
+  "test_window": {
+    "rows": 540,
+    "tickers": [
+      "AAPL",
+      "AMZN",
+      "GOOGL",
+      "MSFT",
+      "NVDA",
+      "TSLA"
+    ],
+    "first_date": "2026-06-30",
+    "last_date": "2026-11-04"
+  },
+  "train_window": {
+    "rows": 6798,
+    "first_date": "2021-12-14",
+    "last_date": "2026-06-22"
+  },
+  "risk_thresholds": {
+    "low_below": 0.014164082779292413,
+    "high_above": 0.023679819831243388
+  },
+  "classification": {
+    "accuracy": 0.3611111111111111,
+    "f1_weighted": 0.3598176093030585,
+    "train_accuracy": 0.5798764342453663,
+    "baselines": {
+      "majority": 0.4148148148148148,
+      "persistence": 0.37962962962962965
+    },
+    "logistic_regression_reference": 0.3592592592592593,
+    "per_ticker_accuracy": {
+      "AAPL": 0.4666666666666667,
+      "AMZN": 0.4,
+      "GOOGL": 0.3,
+      "MSFT": 0.36666666666666664,
+      "NVDA": 0.3,
+      "TSLA": 0.3333333333333333
+    },
+    "confusion_matrix": {
+      "labels": [
+        "Low",
+        "Medium",
+        "High"
+      ],
+      "rows_true_cols_predicted": [
+        [
+          84,
+          51,
+          37
+        ],
+        [
+          78,
+          70,
+          76
+        ],
+        [
+          24,
+          79,
+          41
+        ]
+      ]
+    }
+  },
+  "regression": {
+    "r2": -0.0035439135448191994,
+    "train_r2": 0.014982525488065002,
+    "rmse": 0.024958417462875103,
+    "mae": 0.01700835710892166
+  },
+  "walk_forward": {
+    "windows": [
+      {
+        "first_date": "2025-01-22",
+        "last_date": "2025-05-30",
+        "rows": 540,
+        "accuracy": 0.46296296296296297,
+        "majority": 0.40370370370370373,
+        "persistence": 0.4722222222222222,
+        "logistic_regression_reference": 0.4703703703703704,
+        "regression_r2": -0.009096921233320954
+      },
+      {
+        "first_date": "2025-06-02",
+        "last_date": "2025-10-08",
+        "rows": 540,
+        "accuracy": 0.5648148148148148,
+        "majority": 0.5425925925925926,
+        "persistence": 0.5333333333333333,
+        "logistic_regression_reference": 0.5833333333333334,
+        "regression_r2": -0.015965460038897872
+      },
+      {
+        "first_date": "2025-10-09",
+        "last_date": "2026-02-18",
+        "rows": 540,
+        "accuracy": 0.4703703703703704,
+        "majority": 0.42777777777777776,
+        "persistence": 0.45555555555555555,
+        "logistic_regression_reference": 0.49444444444444446,
+        "regression_r2": -0.004849096913191575
+      },
+      {
+        "first_date": "2026-02-19",
+        "last_date": "2026-06-29",
+        "rows": 540,
+        "accuracy": 0.4222222222222222,
+        "majority": 0.45740740740740743,
+        "persistence": 0.4111111111111111,
+        "logistic_regression_reference": 0.39814814814814814,
+        "regression_r2": -0.0007796921456009187
+      },
+      {
+        "first_date": "2026-06-30",
+        "last_date": "2026-11-04",
+        "rows": 540,
+        "accuracy": 0.3611111111111111,
+        "majority": 0.4148148148148148,
+        "persistence": 0.37962962962962965,
+        "logistic_regression_reference": 0.3592592592592593,
+        "regression_r2": -0.0035439135448191994
+      }
+    ],
+    "mean": {
+      "accuracy": 0.45629629629629626,
+      "majority": 0.4492592592592593,
+      "persistence": 0.4503703703703704,
+      "logistic_regression_reference": 0.46111111111111114,
+      "regression_r2": -0.006847016775166104
+    }
+  },
+  "validation": {
+    "integrity_passed": true,
+    "train_test": {
+      "mode": "DeepChecks",
+      "passed": false,
+      "failures": [
+        "Multivariate Drift"
+      ],
+      "checks_passed": 8
+    }
+  },
+  "data": {
+    "sources": {
+      "AAPL": "yfinance",
+      "MSFT": "yfinance",
+      "GOOGL": "yfinance",
+      "AMZN": "yfinance",
+      "TSLA": "yfinance",
+      "NVDA": "yfinance"
+    },
+    "rows": 7518,
+    "first_date": "2021-11-15",
+    "last_date": "2026-11-11"
+  },
+  "run": {
+    "timestamp_utc": "2026-11-13T01:37:21+00:00",
+    "python": "3.11.9",
+    "scikit_learn": "1.5.2"
+  },
+  "model_version": "version_20261113_063721"
+}
